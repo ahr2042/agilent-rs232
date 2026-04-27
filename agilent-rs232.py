@@ -4,25 +4,28 @@ import serial
 import matplotlib.pyplot as plt
 import argparse
 
-# Initiate the parser
-parser = argparse.ArgumentParser()
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 
-#defaults
-port = "/dev/ttyUSB0"
-baud = 57600
+# Defaults
+port    = "/dev/ttyUSB0"
+baud    = 57600
 channel = 1
-length = 1000
+length  = 1000
 
-# Add arguments
-parser.add_argument("--port", "-p", help="set serial port (default %s)" % port)
-parser.add_argument("--baud", "-b", help="set serial baud rate (default %d)" % baud)
-parser.add_argument("--channel", "-c", help="set probe channel (default %d)" % channel)
-parser.add_argument("--length", "-l", help="number of samples (default %d)" % length)
+parser = argparse.ArgumentParser(
+    description="Capture a waveform from an Agilent 5000-series oscilloscope over RS-232."
+)
+parser.add_argument("--port",    "-p", help="serial port (default: %s)"   % port)
+parser.add_argument("--baud",    "-b", help="baud rate (default: %d)"     % baud)
+parser.add_argument("--channel", "-c", help="probe channel 1 or 2 (default: %d)" % channel)
+parser.add_argument("--length",  "-l", help="sample count: 100, 250, 500, 1000, 2000, MAXimum (default: %d)" % length)
+parser.add_argument("--output",  "-o", help="save the plot to this file (e.g. capture.png, capture.pdf)."
+                                            " Format is inferred from the file extension.")
 
-# Read arguments from the command line
 args = parser.parse_args()
 
-# Evaluate given options
 if args.port:
     port = args.port
 if args.baud:
@@ -33,123 +36,142 @@ if args.length:
     if args.length in ("100", "250", "500", "1000", "2000", "MAXimum"):
         length = args.length
     else:
-        print("Invalid length (must be in {100, 250, 500, 1000, 2000, MAXimum}")
+        print("Invalid length (must be one of: 100, 250, 500, 1000, 2000, MAXimum)")
         exit(1)
-    
 
-# Open serial port using the DTR hardware handshaking mode and 57600 baud
-# A timeout is useful when deciding if a response is "finished"
-ser = serial.Serial(port, baud, dsrdtr=True, timeout=1)  
+# ---------------------------------------------------------------------------
+# Serial communication — connect and identify scope
+# ---------------------------------------------------------------------------
 
-# Ensure the scope is awake and talking
+# DTR hardware handshaking is required by the Agilent 5000 series.
+# A 1-second timeout prevents readline() from blocking indefinitely.
+ser = serial.Serial(port, baud, dsrdtr=True, timeout=1)
+
 ser.write(b'*IDN?\n')
-ser.flush() #flush the serial to ensure the write is sent
-
-#let's get the response
-scope_idn = ser.readline() 
+ser.flush()
+scope_idn = ser.readline()
 
 if scope_idn[0:7] != b'AGILENT':
-    print("Unexpected response from Agilent scope, check your connection and try again")
+    print("Unexpected response from scope — check your connection and try again.")
     ser.close()
-    exit()
+    exit(1)
 
-# ask for data to be formatted as signed WORDs (16 bits, so -32,768 through 32,767)
+# ---------------------------------------------------------------------------
+# Waveform setup
+# ---------------------------------------------------------------------------
+
+# Request signed 16-bit words (range -32768 … 32767), MSB first
 ser.write(b':WAVEform:FORMat WORD\n')
 ser.write(b':WAVeform:BYTeorder MSBFirst\n')
 ser.write(b':WAVeform:UNSigned 0\n')
 
-# ask for 1000 data points
-pointsString = ":WAVeform:POINts %s\n" % length
-ser.write(pointsString.encode())
+# Number of sample points to retrieve
+ser.write((":WAVeform:POINts %s\n" % length).encode())
 
-#set it to examine channel 1 or channel 2
+# Select the requested channel
 if channel == 1:
-    ser.write(b':WAVeform:SOURce CHANnel1\n') 
+    ser.write(b':WAVeform:SOURce CHANnel1\n')
 else:
-    ser.write(b':WAVeform:SOURce CHANnel2\n') 
+    ser.write(b':WAVeform:SOURce CHANnel2\n')
 
-#let's now read what the oscilloscope is set to
+# ---------------------------------------------------------------------------
+# Read waveform preamble (scale / offset parameters)
+# ---------------------------------------------------------------------------
+
+# Acquisition mode: NORM, PEAK, or AVER
 ser.write(b':WAVeform:TYPE?\n')
 ser.flush()
-scope_read_type = ser.readline()[:-1] #TYPE? returns either NORM, PEAK, or AVER followed by a \n
+scope_read_type = ser.readline()[:-1]
 
-#load dispay parameters. All of these return "NR3" format, which is a float-type
-ser.write(b':WAVeform:XINCrement?\n') 
-ser.flush()
+# X-axis (time) scale parameters — all returned in NR3 (float) format
+ser.write(b':WAVeform:XINCrement?\n'); ser.flush()
 scope_x_increment = float(ser.readline())
 
-ser.write(b':WAVeform:XORigin?\n')
-ser.flush()
+ser.write(b':WAVeform:XORigin?\n');   ser.flush()
 scope_x_origin = float(ser.readline())
 
-ser.write(b':WAVeform:XREFerence?\n')
-ser.flush()
+ser.write(b':WAVeform:XREFerence?\n'); ser.flush()
 scope_x_reference = float(ser.readline())
 
-ser.write(b':WAVeform:YINCrement?\n')
-ser.flush()
-scope_y_increment = float(ser.readline()) 
+# Y-axis (voltage) scale parameters
+ser.write(b':WAVeform:YINCrement?\n'); ser.flush()
+scope_y_increment = float(ser.readline())
 
-ser.write(b':WAVeform:YORigin?\n')
-ser.flush()
-scope_y_origin = float(ser.readline()) 
+ser.write(b':WAVeform:YORigin?\n');   ser.flush()
+scope_y_origin = float(ser.readline())
 
-ser.write(b':WAVeform:YREFerence?\n')
-ser.flush()
+ser.write(b':WAVeform:YREFerence?\n'); ser.flush()
 scope_y_reference = float(ser.readline())
 
-ser.flush()
+# ---------------------------------------------------------------------------
+# Retrieve raw waveform data
+# ---------------------------------------------------------------------------
 
-# let's now try get the data!
 ser.write(b':WAVeform:DATA?\n')
 ser.flush()
-scope_data_bytes = ser.readline() #the response here is formated preamble,data where the preamble provides the length of the data
+# Response format: #<N><L…><data bytes>
+# where N is the number of digits in L, and L is the byte-count of the data block
+scope_data_bytes = ser.readline()
 
-#we're done with the scope - be a tidy kiwi, don't forget to close the port
-ser.close() 
+ser.close()
 
-print("Oscilloscope mode: ",scope_read_type.decode())
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
 
-print("X increment (S):", scope_x_increment)
-print("X reference (S):", scope_x_reference)
-print("X origin (S):", scope_x_origin)
+print("Oscilloscope mode:",  scope_read_type.decode())
+print("X increment (s):",    scope_x_increment)
+print("X reference:",        scope_x_reference)
+print("X origin (s):",       scope_x_origin)
+print("Y increment (V):",    scope_y_increment)
+print("Y reference:",        scope_y_reference)
+print("Y origin (V):",       scope_y_origin)
 
-print("Y increment (V):", scope_y_increment)
-print("Y reference (V):", scope_y_reference)
-print("Y origin (V):", scope_y_origin)
+# ---------------------------------------------------------------------------
+# Decode raw bytes → voltage and time arrays
+# ---------------------------------------------------------------------------
 
-#the preamble is in the format #[length of length of data][length of data],[data]
-scope_data_preamble_len = scope_data_bytes[1] - 48 #convert the ASCII digit to an integer
-scope_data_len = int(scope_data_bytes[2:2+scope_data_preamble_len]) #the data length in bytes
-print("Data length (bytes): ", scope_data_len)
+scope_data_preamble_len = scope_data_bytes[1] - 48           # ASCII digit → int
+scope_data_len          = int(scope_data_bytes[2:2+scope_data_preamble_len])
+print("Data length (bytes):", scope_data_len)
 
-data_points = []
+# Convert each 2-byte signed integer to a calibrated voltage.
+# Formula from Agilent 5000 Series Programmer's Guide, p. 595:
+#   voltage = (raw_value - y_reference) * y_increment + y_origin
+data_voltages = []
 for i in range(0, scope_data_len, 2):
-    data_offset = i+scope_data_preamble_len + 2
-    data_point = int.from_bytes(scope_data_bytes[data_offset:data_offset+2], byteorder='big', signed=True)
+    offset    = i + scope_data_preamble_len + 2
+    raw_value = int.from_bytes(scope_data_bytes[offset:offset+2], byteorder='big', signed=True)
+    voltage   = (raw_value - scope_y_reference) * scope_y_increment + scope_y_origin
+    data_voltages.append(voltage)
 
-    #using the formula from the agilent 5000 series programmer's guide reference manual page 595
-    # voltage = [(data value - yreference) * yincrement] + yorigin
-    data_point_voltage = ((data_point - scope_y_reference) * scope_y_increment) + scope_y_origin
-    data_points.append(data_point_voltage)
+print("Min (V):", min(data_voltages))
+print("Max (V):", max(data_voltages))
 
+# Build the corresponding time axis.
+# Formula from the same reference manual (p. 595):
+#   time = (sample_index - x_reference) * x_increment + x_origin
+data_times = [
+    (i - scope_x_reference) * scope_x_increment + scope_x_origin
+    for i in range(len(data_voltages))
+]
 
-print("Min (V):", min(data_points))
-print("Max (V):", max(data_points))
+# ---------------------------------------------------------------------------
+# Plot
+# ---------------------------------------------------------------------------
 
-data_points_times = []
-for i in range(0, len(data_points)):
-    #using the formula from the agilent 5000 series programmer's guide reference manual page 595
-    # time = [(data point number - xreference) * xincrement] + xorigin
-    data_point_time = ((i - scope_x_reference) * scope_x_increment) + scope_x_origin
-    data_points_times.append(data_point_time)
-
-#now we want to graph it
-plt.plot(data_points_times, data_points)
-plt.title("Oscilloscope capture (mode: "+scope_read_type.decode()+")")
-plt.xlabel("Time (S)")
+fig, ax = plt.subplots()
+ax.plot(data_times, data_voltages)
+ax.set_title("Oscilloscope capture (mode: " + scope_read_type.decode() + ")")
+ax.set_xlabel("Time (s)")
+ax.set_ylabel("Voltage (V)")
 plt.xticks(rotation=45)
-plt.ylabel("Voltage (V)")
 plt.tight_layout()
-plt.show()
 
+# Save the figure to disk when --output is supplied.
+# matplotlib infers the file format from the extension (.png, .pdf, .svg, …).
+if args.output:
+    fig.savefig(args.output, dpi=150, bbox_inches='tight')
+    print("Plot saved to:", args.output)
+
+plt.show()
