@@ -26,6 +26,10 @@ parser.add_argument("--length",  "-l", help="sample count: 100, 250, 500, 1000, 
 parser.add_argument("--output",  "-o", help="save the scope's screen bitmap to this file "
                                             "(e.g. capture.png, capture.bmp). "
                                             "Format is inferred from the file extension.")
+parser.add_argument("--scale",   "-s", type=float,
+                                       help="upscale the saved screenshot by this factor "
+                                            "(e.g. 2.0 doubles each dimension). "
+                                            "Uses Lanczos resampling. Only applies with --output.")
 
 args = parser.parse_args()
 
@@ -41,6 +45,9 @@ if args.length:
     else:
         print("Invalid length (must be one of: 100, 250, 500, 1000, 2000, MAXimum)")
         exit(1)
+if args.scale is not None and args.scale <= 0:
+    print("Invalid scale factor (must be a positive number, e.g. 2.0)")
+    exit(1)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -222,6 +229,14 @@ if scope_bitmap is not None:
     # user can request any supported format (.png, .bmp, .jpg, …) via
     # the file extension of --output.
     img = Image.open(io.BytesIO(scope_bitmap))
+
+    if args.scale is not None:
+        # Lanczos gives the sharpest result for upscaling low-resolution bitmaps
+        new_w = round(img.width  * args.scale)
+        new_h = round(img.height * args.scale)
+        img   = img.resize((new_w, new_h), Image.LANCZOS)
+        print("Upscaled to %dx%d (factor %.2f)" % (new_w, new_h, args.scale))
+
     img.save(args.output)
     print("Screenshot saved to:", args.output)
 
