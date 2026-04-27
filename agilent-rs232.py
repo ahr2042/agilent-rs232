@@ -1,8 +1,10 @@
 #!/usr/bin/python3
 
+import io
 import serial
 import matplotlib.pyplot as plt
 import argparse
+from PIL import Image
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -21,8 +23,9 @@ parser.add_argument("--port",    "-p", help="serial port (default: %s)"   % port
 parser.add_argument("--baud",    "-b", help="baud rate (default: %d)"     % baud)
 parser.add_argument("--channel", "-c", help="probe channel 1 or 2 (default: %d)" % channel)
 parser.add_argument("--length",  "-l", help="sample count: 100, 250, 500, 1000, 2000, MAXimum (default: %d)" % length)
-parser.add_argument("--output",  "-o", help="save the plot to this file (e.g. capture.png, capture.pdf)."
-                                            " Format is inferred from the file extension.")
+parser.add_argument("--output",  "-o", help="save the scope's screen bitmap to this file "
+                                            "(e.g. capture.png, capture.bmp). "
+                                            "Format is inferred from the file extension.")
 
 args = parser.parse_args()
 
@@ -40,11 +43,50 @@ if args.length:
         exit(1)
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def read_ieee_block(ser):
+    """
+    Read one IEEE 488.2 definite-length arbitrary block from the serial port.
+
+    Block format:  # <N> <L×N digits> <payload bytes>
+      N        — single ASCII digit: number of digits that encode the payload length
+      L        — payload length in bytes (N ASCII digits)
+      payload  — L raw bytes
+
+    readline() cannot be used here because the payload is binary and may
+    contain 0x0A (\n) bytes that would terminate the read prematurely.
+    """
+    # Consume bytes until the mandatory '#' start marker
+    while True:
+        c = ser.read(1)
+        if not c:
+            raise IOError("Timeout waiting for IEEE block start marker '#'")
+        if c == b'#':
+            break
+
+    n      = int(ser.read(1))           # number of length digits
+    length = int(ser.read(n))           # payload size in bytes
+
+    # Read exactly 'length' bytes, looping because a single read() call may
+    # return fewer bytes than requested when the OS buffer isn't full yet
+    data = bytearray()
+    while len(data) < length:
+        chunk = ser.read(length - len(data))
+        if not chunk:
+            raise IOError("Timeout while reading IEEE block payload")
+        data.extend(chunk)
+
+    return bytes(data)
+
+
+# ---------------------------------------------------------------------------
 # Serial communication — connect and identify scope
 # ---------------------------------------------------------------------------
 
 # DTR hardware handshaking is required by the Agilent 5000 series.
-# A 1-second timeout prevents readline() from blocking indefinitely.
+# A 1-second timeout prevents read() from blocking indefinitely.
 ser = serial.Serial(port, baud, dsrdtr=True, timeout=1)
 
 ser.write(b'*IDN?\n')
@@ -87,7 +129,7 @@ scope_read_type = ser.readline()[:-1]
 ser.write(b':WAVeform:XINCrement?\n'); ser.flush()
 scope_x_increment = float(ser.readline())
 
-ser.write(b':WAVeform:XORigin?\n');   ser.flush()
+ser.write(b':WAVeform:XORigin?\n');    ser.flush()
 scope_x_origin = float(ser.readline())
 
 ser.write(b':WAVeform:XREFerence?\n'); ser.flush()
@@ -97,7 +139,7 @@ scope_x_reference = float(ser.readline())
 ser.write(b':WAVeform:YINCrement?\n'); ser.flush()
 scope_y_increment = float(ser.readline())
 
-ser.write(b':WAVeform:YORigin?\n');   ser.flush()
+ser.write(b':WAVeform:YORigin?\n');    ser.flush()
 scope_y_origin = float(ser.readline())
 
 ser.write(b':WAVeform:YREFerence?\n'); ser.flush()
@@ -110,8 +152,23 @@ scope_y_reference = float(ser.readline())
 ser.write(b':WAVeform:DATA?\n')
 ser.flush()
 # Response format: #<N><L…><data bytes>
-# where N is the number of digits in L, and L is the byte-count of the data block
 scope_data_bytes = ser.readline()
+
+# ---------------------------------------------------------------------------
+# Capture scope screen bitmap (only when --output is requested)
+# ---------------------------------------------------------------------------
+
+scope_bitmap = None
+if args.output:
+    # A full BMP over RS-232 at 57600 baud can take over two minutes;
+    # raise the per-read timeout accordingly before issuing the command
+    ser.timeout = 180
+    # The 54622D requires an explicit format argument; BMP is the supported format
+    print("Requesting screen bitmap from scope (~30 s over RS-232 at 57600 baud)…")
+    ser.write(b':DISPlay:DATA? BMP\n')
+    ser.flush()
+    scope_bitmap = read_ieee_block(ser)
+    print("Bitmap received (%d bytes)" % len(scope_bitmap))
 
 ser.close()
 
@@ -157,6 +214,18 @@ data_times = [
 ]
 
 # ---------------------------------------------------------------------------
+# Save scope bitmap (when --output was supplied)
+# ---------------------------------------------------------------------------
+
+if scope_bitmap is not None:
+    # The scope returns a raw BMP. Pillow handles the conversion so the
+    # user can request any supported format (.png, .bmp, .jpg, …) via
+    # the file extension of --output.
+    img = Image.open(io.BytesIO(scope_bitmap))
+    img.save(args.output)
+    print("Screenshot saved to:", args.output)
+
+# ---------------------------------------------------------------------------
 # Plot
 # ---------------------------------------------------------------------------
 
@@ -167,11 +236,4 @@ ax.set_xlabel("Time (s)")
 ax.set_ylabel("Voltage (V)")
 plt.xticks(rotation=45)
 plt.tight_layout()
-
-# Save the figure to disk when --output is supplied.
-# matplotlib infers the file format from the extension (.png, .pdf, .svg, …).
-if args.output:
-    fig.savefig(args.output, dpi=150, bbox_inches='tight')
-    print("Plot saved to:", args.output)
-
 plt.show()
