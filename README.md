@@ -11,7 +11,7 @@ It can convert this:
 To this:
 
 ![matplotlib](reading.png?raw=true "Matplotlib rendering")
-
+![matplotlib](Screenshot.png?raw=true "Scope screenshot")
 # Dependencies
 
 - `pyserial`
