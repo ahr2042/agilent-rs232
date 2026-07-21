@@ -1,26 +1,72 @@
-# agilent-rs232
+# Agilent RS-232 Oscilloscope Capture
 
-> **Fork notice:** This is a fork of the original project. The original author wrote a blog post to go along with the base script — you can find it [here](https://01001000.xyz/2020-05-07-Walkthrough-Agilent-Oscilloscope-RS232/). This fork extends the script with screenshot capture and upscaling support.
+![Python 3](https://img.shields.io/badge/python-3-blue.svg)
+![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)
 
-A script to read the waveform from an Agilent 54621A/54622D oscilloscope via RS-232, display it using matplotlib, and optionally save the scope's screen as an image file.
+A command-line tool that captures a live waveform from an **Agilent 54621A / 54622D**
+oscilloscope over an RS-232 serial link, decodes it into calibrated time/voltage
+samples, and plots it with matplotlib. It can also pull the scope's on-screen
+display as a bitmap and save it to an image file, with optional high-quality
+upscaling.
 
-It can convert this:
+> **Fork notice** — This is a fork of the original
+> [`agilent-rs232`](https://01001000.xyz/2020-05-07-Walkthrough-Agilent-Oscilloscope-RS232/)
+> project by kiwih, whose walkthrough blog post is an excellent companion to the
+> base script. This fork adds direct screen-bitmap capture (`--output`), Lanczos
+> upscaling of saved screenshots (`--scale`), and a refactor with clearer
+> diagnostics and more robust binary-block parsing.
 
-![scope](scope.jpg?raw=true "Oscilloscope reading")
+## Features
 
-To this:
+- **Waveform capture** — reads up to 2000 points from channel 1 or 2 as signed
+  16-bit words and converts them to calibrated volts and seconds using the
+  scope's own scale/offset preamble.
+- **Instant plotting** — renders the captured trace with matplotlib.
+- **Screen capture** — downloads the scope's live display as a BMP and saves it
+  as PNG, BMP, JPEG, or any other Pillow-supported format (`--output`).
+- **Upscaling** — optionally enlarges the saved screenshot with Lanczos
+  resampling (`--scale`).
+- **Robust binary transfer** — parses IEEE 488.2 definite-length blocks so binary
+  payloads that contain newline (`0x0A`) bytes are read correctly.
 
-![matplotlib](reading.png?raw=true "Matplotlib rendering")
-![matplotlib](Screenshot.png?raw=true "Scope screenshot")
-# Dependencies
+## Example
 
-- `pyserial`
-- `matplotlib`
-- `Pillow` (required for `--output` / `--scale`)
+The tool reads the trace shown on the scope…
 
-# Usage
+![Photo of the oscilloscope displaying a square wave](scope.jpg?raw=true "Oscilloscope display")
 
-The program is written in Python 3.
+…and renders it locally with matplotlib:
+
+![Terminal output and matplotlib plot of the captured waveform](reading.png?raw=true "Matplotlib rendering")
+
+## Requirements
+
+### Hardware
+
+- An Agilent 54621A or 54622D oscilloscope. Other models that share the same
+  RS-232 SCPI command set may also work, but are untested.
+- An RS-232 connection between the scope and the host computer — typically a
+  USB-to-RS-232 adapter, which appears as `/dev/ttyUSB0` on Linux by default.
+- The scope's I/O configured for RS-232 with DTR/DSR hardware handshaking and a
+  baud rate matching the `--baud` setting (57600 by default).
+
+### Software
+
+- Python 3
+- [`pyserial`](https://pypi.org/project/pyserial/) — serial communication
+- [`matplotlib`](https://pypi.org/project/matplotlib/) — plotting
+- [`Pillow`](https://pypi.org/project/Pillow/) — image handling (imported at
+  startup, so it is required even when you are not saving a screenshot)
+
+## Installation
+
+```bash
+git clone https://github.com/ahr2042/agilent-rs232.git
+cd agilent-rs232
+pip install pyserial matplotlib Pillow
+```
+
+## Usage
 
 ```
 usage: agilent-rs232.py [-h] [--port PORT] [--baud BAUD] [--channel CHANNEL]
@@ -45,20 +91,67 @@ options:
                         applies with --output.
 ```
 
-## Screenshot examples
+### Plot a waveform
+
+Capture 1000 points from channel 1 on the default port and plot them:
+
+```bash
+python3 agilent-rs232.py
+```
+
+Capture the maximum number of points from channel 2 on a specific port:
+
+```bash
+python3 agilent-rs232.py -p /dev/ttyUSB1 -c 2 -l MAXimum
+```
+
+The script prints the scope's acquisition mode, the X/Y scaling parameters, and
+the measured voltage range, then opens a matplotlib window with the trace.
+
+### Save the scope's screenshot
 
 Save the scope's screen at native resolution:
-```
+
+```bash
 python3 agilent-rs232.py -o capture.png
 ```
 
 Save with 2× upscaling (512×349 → 1024×698):
-```
+
+```bash
 python3 agilent-rs232.py -o capture.png -s 2
 ```
 
-The screenshot is retrieved directly from the scope as a BMP over RS-232 and converted to the requested format by Pillow. Transfer takes approximately 30 seconds at 57600 baud.
+The screenshot is retrieved directly from the scope as a BMP over RS-232 and
+converted to the requested format by Pillow; the output format is inferred from
+the file extension. Transfer takes roughly 30 seconds at 57600 baud.
 
-# Other implementations
+![Terminal command and the resulting 2× upscaled scope screenshot](Screenshot.png?raw=true "Screenshot capture with upscaling")
 
-A more full-featured approach to reading scopes and other instruments from Python can be found under the [PyVisa](https://pyvisa.readthedocs.io/en/latest/) library.
+## How it works
+
+1. **Connect & identify** — opens the serial port with DTR/DSR hardware
+   handshaking and sends `*IDN?`, verifying the reply begins with `AGILENT`.
+2. **Configure the transfer** — requests signed 16-bit words, MSB-first, sets the
+   point count, and selects the source channel via `:WAVeform` SCPI commands.
+3. **Read the preamble** — queries the X and Y increment, origin, and reference
+   values that describe how to convert raw samples into real units.
+4. **Fetch the data** — issues `:WAVeform:DATA?` and reads the returned
+   IEEE 488.2 definite-length block.
+5. **Decode & plot** — applies the scope's calibration formulas
+   (`voltage = (raw − y_reference) × y_increment + y_origin`, and the analogous
+   formula for time) and renders the result with matplotlib.
+6. **Screenshot (optional)** — with `--output`, requests `:DISPlay:DATA? BMP`,
+   reads the bitmap block, optionally upscales it, and saves it via Pillow.
+
+## Related projects
+
+For a more full-featured, cross-platform way to talk to oscilloscopes and other
+lab instruments from Python, see the
+[PyVISA](https://pyvisa.readthedocs.io/en/latest/) library.
+
+## License
+
+This project is licensed under the **GNU General Public License v3.0**. It is a
+fork of `agilent-rs232` by kiwih, which was released under the MIT License; both
+license texts are preserved in the [`LICENSE`](LICENSE) file.
