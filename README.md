@@ -3,11 +3,48 @@
 ![Python 3](https://img.shields.io/badge/python-3-blue.svg)
 ![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)
 
-A command-line tool that captures a live waveform from an **Agilent 54621A / 54622D**
-oscilloscope over an RS-232 serial link, decodes it into calibrated time/voltage
-samples, and plots it with matplotlib. It can also pull the scope's on-screen
-display as a bitmap and save it to an image file, with optional high-quality
-upscaling.
+Tools for driving an **Agilent 54621A / 54622D** oscilloscope over an RS-232
+serial link:
+
+- **`agilent-rs232.py`** — a command-line tool that captures a waveform, decodes
+  it into calibrated time/voltage samples, and plots it with matplotlib. It can
+  also pull the scope's on-screen display as a bitmap, with optional upscaling.
+- **`agilent-gui.py`** — a Qt desktop application with live streaming, channel
+  and trigger control, cursors, running measurement statistics, FFT, a SCPI
+  console and a script runner.
+
+## Why the trace is rebuilt locally
+
+At 57600 baud — the highest rate the 546xx supports — the link carries
+**5760 bytes/s**. That single number decides the whole design:
+
+| Transfer | Payload | Time | Effective rate |
+|---|---|---|---|
+| Screen bitmap (`:DISPlay:DATA? BMP`) | ~170 kB | ~30 s | 0.03 frames/s |
+| Waveform, 2000 pts, WORD | 4 kB | 0.69 s | 1.4 frames/s |
+| Waveform, 1000 pts, WORD | 2 kB | 0.35 s | 2.9 frames/s |
+| Waveform, 1000 pts, BYTE | 1 kB | 0.17 s | 5.7 frames/s |
+| Waveform, 500 pts, BYTE | 0.5 kB | 0.09 s | ~10 frames/s |
+
+Scraping the scope's screen is roughly **170× slower** than transferring the
+samples and redrawing the trace on the host, so a live video feed of the display
+is not achievable at any supported baud rate — it would be one frame every half
+minute. The GUI therefore streams raw samples and reconstructs the waveform
+locally, which is not only far faster but yields real voltages that cursors,
+measurements and FFT can operate on. The screen bitmap remains available as a
+deliberate one-shot capture.
+
+Two consequences worth knowing:
+
+- The 546xx ADC is **8 bits**, so `WORD` format spends twice the bandwidth to
+  carry the same information as `BYTE` in normal acquisition. The GUI uses
+  `BYTE` by default and switches to `WORD` only for averaging, where the scope
+  genuinely accumulates sub-LSB precision.
+- The waveform scaling (X/Y increment, origin and reference) is read once and
+  cached, then re-read only when a setting actually changes, so steady-state
+  streaming is a single `:WAVeform:DATA?` per frame. The 54622D does not answer
+  the combined `:WAVeform:PREamble?` query, so those values are fetched with the
+  six individual scaling queries the instrument does support.
 
 > **Fork notice** — This is a fork of the original
 > [`agilent-rs232`](https://01001000.xyz/2020-05-07-Walkthrough-Agilent-Oscilloscope-RS232/)
@@ -16,7 +53,63 @@ upscaling.
 > upscaling of saved screenshots (`--scale`), and a refactor with clearer
 > diagnostics and more robust binary-block parsing.
 
-## Features
+## The GUI
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python agilent-gui.py --port /dev/ttyUSB0 --connect
+```
+
+Five views, reachable from the navigation rail:
+
+| View | Contents |
+|---|---|
+| **Channels** | Live trace, per-channel scale/offset/coupling/bandwidth/probe, timebase, trigger, and a SCPI console |
+| **Measure** | Gated measurements with running mean, standard deviation, min and max across acquisitions |
+| **Scripts** | Script editor with syntax highlighting, a run/halt interpreter, debug console and searchable command library |
+| **Data** | Cursors with Δt / 1÷Δt / ΔV readouts, local FFT, screen captures and CSV export |
+| **Config** | Serial port and baud, display preferences, error queue and `*RST` |
+
+**Mixed-signal support** — the 54622D's two analog channels appear as CH1/CH2
+and its sixteen digital channels as POD1 (D0–D7) and POD2 (D8–D15). Enabling a
+pod adds a stacked logic lane beneath the analog trace, sharing its time axis.
+
+**Script language** — bare SCPI lines plus `FOR i = 1 TO n` / `NEXT`, `WAIT
+<ms>`, `PRINT` and `#` comments. Scripts are interpreted one statement per timer
+tick, so a running script never blocks the interface and `HALT` takes effect
+immediately.
+
+Measurements available: Vpp, V-amplitude, Vmax, Vmin, V-average, V-RMS,
+frequency, period, rise time, fall time and duty cycle. Amplitude, timing and
+duty-cycle figures use the histogram top/base method rather than raw max/min, so
+overshoot and ringing do not distort them.
+
+### Architecture
+
+The serial port is a single shared blocking resource, so all I/O runs on a
+dedicated thread behind a priority queue and communicates with the interface
+purely through Qt signals. User actions preempt the streaming poll. Because the
+scope can go briefly busy after a setting change and answer a query late, every
+streaming cycle starts from an empty input buffer and any failure drains the
+line to silence before retrying — so a late reply can never desynchronise the
+stream, and the screen-bitmap capture runs as a solo transaction that never
+collides with a streamed waveform.
+
+```
+agiloscope/
+    protocol.py     IEEE 488.2 blocks, preamble, decoding, command catalogue
+    transport.py    threaded serial link, priority queue, streaming loop
+    instrument.py   scope state and SCPI generation
+    measure.py      measurements, Welford statistics, FFT
+    plot.py         waveform rendering, cursors, digital lane
+    store.py        screen captures and exports
+    theme.py        design tokens and stylesheet
+    widgets.py      panels, dials, segmented controls, badges
+    views/          the five screens
+```
+
+## CLI features
 
 - **Waveform capture** — reads up to 2000 points from channel 1 or 2 as signed
   16-bit words and converts them to calibrated volts and seconds using the
@@ -52,19 +145,31 @@ The tool reads the trace shown on the scope…
 
 ### Software
 
+For the command-line tool:
+
 - Python 3
 - [`pyserial`](https://pypi.org/project/pyserial/) — serial communication
 - [`matplotlib`](https://pypi.org/project/matplotlib/) — plotting
 - [`Pillow`](https://pypi.org/project/Pillow/) — image handling (imported at
   startup, so it is required even when you are not saving a screenshot)
 
+The GUI additionally needs [`PyQt6`](https://pypi.org/project/PyQt6/),
+[`pyqtgraph`](https://pypi.org/project/pyqtgraph/) and
+[`numpy`](https://pypi.org/project/numpy/); see `requirements.txt`.
+
 ## Installation
 
 ```bash
 git clone https://github.com/ahr2042/agilent-rs232.git
 cd agilent-rs232
-pip install pyserial matplotlib Pillow
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
+
+On distributions where the system Python is externally managed (Debian, Ubuntu
+24.04 and later), the virtual environment above avoids `pip` refusing to
+install. For the command-line tool alone, `pip install pyserial matplotlib
+Pillow` is sufficient.
 
 ## Usage
 
