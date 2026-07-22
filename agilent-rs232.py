@@ -12,7 +12,7 @@ from PIL import Image
 
 # Defaults
 port    = "/dev/ttyUSB0"
-baud    = 57600
+baud    = 9600
 channel = 1
 length  = 1000
 
@@ -158,8 +158,11 @@ scope_y_reference = float(ser.readline())
 
 ser.write(b':WAVeform:DATA?\n')
 ser.flush()
-# Response format: #<N><L…><data bytes>
-scope_data_bytes = ser.readline()
+# Response format: #<N><L…><data bytes>.
+# read_ieee_block() is mandatory here: the payload is binary and 16-bit
+# samples frequently contain 0x0A, which readline() would treat as the end
+# of the response and silently truncate the capture.
+scope_data = read_ieee_block(ser)
 
 # ---------------------------------------------------------------------------
 # Capture scope screen bitmap (only when --output is requested)
@@ -195,17 +198,14 @@ print("Y origin (V):",       scope_y_origin)
 # Decode raw bytes → voltage and time arrays
 # ---------------------------------------------------------------------------
 
-scope_data_preamble_len = scope_data_bytes[1] - 48           # ASCII digit → int
-scope_data_len          = int(scope_data_bytes[2:2+scope_data_preamble_len])
-print("Data length (bytes):", scope_data_len)
+print("Data length (bytes):", len(scope_data))
 
 # Convert each 2-byte signed integer to a calibrated voltage.
 # Formula from Agilent 5000 Series Programmer's Guide, p. 595:
 #   voltage = (raw_value - y_reference) * y_increment + y_origin
 data_voltages = []
-for i in range(0, scope_data_len, 2):
-    offset    = i + scope_data_preamble_len + 2
-    raw_value = int.from_bytes(scope_data_bytes[offset:offset+2], byteorder='big', signed=True)
+for i in range(0, len(scope_data) - 1, 2):
+    raw_value = int.from_bytes(scope_data[i:i+2], byteorder='big', signed=True)
     voltage   = (raw_value - scope_y_reference) * scope_y_increment + scope_y_origin
     data_voltages.append(voltage)
 
