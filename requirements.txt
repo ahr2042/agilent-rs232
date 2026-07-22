@@ -1,0 +1,6 @@
+# Qt GUI (agilent-gui.py)
+PyQt6>=6.5
+pyqtgraph>=0.13
+pyserial>=3.5
+numpy>=1.24
+pillow>=9.0
