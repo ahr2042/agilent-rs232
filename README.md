@@ -61,6 +61,22 @@ python3 -m venv .venv
 .venv/bin/python agilent-gui.py --port /dev/ttyUSB0 --connect
 ```
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/gui/channels.png?raw=true" alt="Channels view with live trace, vertical controls and SCPI console"><br><sub><b>Channels</b> — live trace, per-channel controls and the SCPI console</sub></td>
+    <td width="50%"><img src="docs/gui/measure.png?raw=true" alt="Measure view with gated measurements and running statistics"><br><sub><b>Measure</b> — gated measurements with running mean, σ, min and max</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/gui/scripts.png?raw=true" alt="Scripts view with editor, interpreter, debug console and command library"><br><sub><b>Scripts</b> — script editor, run/halt interpreter and command library</sub></td>
+    <td width="50%"><img src="docs/gui/data.png?raw=true" alt="Data view with cursors, FFT, captures and CSV export"><br><sub><b>Data</b> — cursors, local FFT, captures and CSV export</sub></td>
+  </tr>
+</table>
+
+<sub>Interface designs for the five views, produced in
+<a href="https://stitch.withgoogle.com/">Stitch</a>. The layout, navigation rail and
+design language match the app; placeholder instrument branding and a few decorative
+controls are Stitch's own.</sub>
+
 Five views, reachable from the navigation rail:
 
 | View | Contents |
